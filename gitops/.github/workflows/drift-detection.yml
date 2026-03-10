@@ -1,0 +1,106 @@
+name: Infrastructure Drift Detection
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # Daily at 8 AM UTC
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  # ────────────────────────────────
+  # Job 1: Check AWS Drift
+  # ────────────────────────────────
+  aws-drift:
+    name: 🔍 AWS Drift Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Terraform Init
+        run: cd terraform/aws && terraform init
+
+      - name: Detect Drift
+        id: drift
+        run: |
+          cd terraform/aws
+          terraform plan -detailed-exitcode -var-file=environments/dev/terraform.tfvars 2>&1 | tee plan.out
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "⚠️ DRIFT DETECTED in AWS infrastructure!"
+          elif [ $EXIT_CODE -eq 0 ]; then
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "✅ No drift in AWS infrastructure"
+          else
+            echo "❌ Terraform plan failed"
+            exit 1
+          fi
+
+      - name: Create Issue on Drift
+        if: steps.drift.outputs.drift_detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Infrastructure Drift Detected (AWS)',
+              body: 'Drift detected in AWS infrastructure. Run `terraform plan` to see changes.\n\nDetected at: ' + new Date().toISOString(),
+              labels: ['drift', 'aws', 'infrastructure']
+            })
+
+  # ────────────────────────────────
+  # Job 2: Check Azure Drift
+  # ────────────────────────────────
+  azure-drift:
+    name: 🔍 Azure Drift Detection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Terraform Init
+        run: cd terraform/azure && terraform init
+
+      - name: Detect Drift
+        id: drift
+        run: |
+          cd terraform/azure
+          terraform plan -detailed-exitcode -var-file=environments/dev/terraform.tfvars 2>&1 | tee plan.out
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Issue on Drift
+        if: steps.drift.outputs.drift_detected == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '⚠️ Infrastructure Drift Detected (Azure)',
+              body: 'Drift detected in Azure infrastructure.',
+              labels: ['drift', 'azure', 'infrastructure']
+            })
